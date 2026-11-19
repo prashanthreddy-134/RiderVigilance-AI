@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RiderVigilance AI - Rider Fatigue & Drowsiness Monitoring System</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700&display=swap"
+        rel="stylesheet">
+
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body class="dark-theme">
+
+    <!-- Actionable Warning Alert Banner -->
+    <div id="alarm-banner" class="alarm-banner hidden">
+        <div class="alarm-content">
+            <i class="fa-solid fa-triangle-exclamation pulse-icon"></i>
+            <span id="alarm-banner-text">⚠️ DROWSINESS DETECTED — YOU LOOK TIRED. PLEASE DO FACE WASH / TAKE A SHORT
+                BREAK.</span>
+            <button id="mute-alarm-btn" onclick="toggleMuteAudio()"><i class="fa-solid fa-volume-xmark"></i>
+                Mute</button>
+        </div>
+    </div>
+
+    <!-- Main Navigation Bar -->
+    <header class="navbar">
+        <div class="nav-brand">
+            <div class="logo-icon"><i class="fa-solid fa-motorcycle"></i></div>
+            <div class="brand-text">
+                <h1>RiderVigilance AI</h1>
+                <span class="sub-title">Real-Time Rider Fatigue & Drowsiness Monitoring</span>
+            </div>
+        </div>
+
+        <div class="nav-controls">
+            <div class="status-indicator">
+                <span class="status-dot" id="system-status-dot"></span>
+                <span id="system-status-text">SYSTEM ACTIVE</span>
+            </div>
+
+            <!-- Enable Alarm Sound button (bypasses browser audio autoplay restrictions) -->
+            <button class="btn btn-secondary" id="enable-audio-btn" onclick="enableAudioContext()">
+                <i class="fa-solid fa-volume-high"></i> <span id="audio-btn-text">Enable Alarm Sound</span>
+            </button>
+
+            <button class="btn btn-secondary" onclick="toggleFeedSource()" id="toggle-source-btn">
+                <i class="fa-solid fa-camera"></i> <span id="source-btn-text">Switch to Live Webcam</span>
+            </button>
+
+            <button class="btn btn-primary" onclick="exportActiveLog()">
+                <i class="fa-solid fa-file-csv"></i> Export CSV Log
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Dashboard Container -->
+    <main class="dashboard-container">
+
+        <!-- Top Row: Video Stream & Telemetry Overview -->
+        <section class="grid-top">
+
+            <!-- Video Camera & Scenario Controls Card -->
+            <div class="glass-card video-card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-video"></i> Live Camera Feed</h2>
+                    <div class="badge-mode" id="feed-mode-badge">SIMULATED FEED</div>
+                </div>
+
+                <div class="video-container">
+                    <img src="{{ url_for('video_feed') }}" alt="Rider Video Feed" id="video-stream">
+
+                    <div class="state-overlay-badge" id="overlay-state-badge">
+                        <span class="badge-dot" id="state-dot"></span>
+                        <span id="state-text">ALERT (FOCUSED)</span>
+                    </div>
+                </div>
+
+                <div class="scenario-toolbar">
+                    <span class="toolbar-label"><i class="fa-solid fa-sliders"></i> Test Scenarios:</span>
+                    <div class="button-group">
+                        <button class="btn-scenario active" onclick="setScenario('normal', this)">Alert (Normal)</button>
+                        <button class="btn-scenario" onclick="setScenario('mild_fatigue', this)">Mild Fatigue</button>
+                        <button class="btn-scenario" onclick="setScenario('yawning', this)">Severe Yawning</button>
+                        <button class="btn-scenario danger" onclick="setScenario('microsleep_drowsy', this)">Drowsy Microsleep</button>
+                        <button class="btn-scenario danger" onclick="setScenario('repeated_closures', this)"><i class="fa-solid fa-eye-slash"></i> Repeated Closures (Sleepy)</button>
+                        <button class="btn-scenario danger" onclick="setScenario('mobile_use', this)"><i class="fa-solid fa-mobile-screen-button"></i> Mobile Use</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Telemetry & State Classification Column -->
+            <div class="telemetry-column">
+
+                <!-- Primary State Card -->
+                <div class="glass-card state-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-brain"></i> Rider State Classifier</h2>
+                        <span class="confidence-badge">Confidence: <span id="confidence-val">99%</span></span>
+                    </div>
+
+                    <div class="state-display-box" id="state-display-box">
+                        <div class="state-icon-large" id="state-icon"><i class="fa-solid fa-face-smile"></i></div>
+                        <div class="state-details">
+                            <h3 id="current-state-title">ALERT (FOCUSED)</h3>
+                            <p id="current-state-desc">Rider is attentive with steady blink rate and eye openness.</p>
+                        </div>
+                    </div>
+
+                    <div class="score-container">
+                        <div class="score-header">
+                            <span>Fatigue Score (S)</span>
+                            <span class="score-num" id="fatigue-score-val">0.12</span>
+                        </div>
+                        <div class="progress-bar-bg">
+                            <div class="progress-bar-fill" id="fatigue-score-bar" style="width: 12%;"></div>
+                        </div>
+                        <div class="score-legend">
+                            <span>0.0 (Alert)</span>
+                            <span>0.4 (Mild)</span>
+                            <span>0.6 (Severe)</span>
+                            <span>1.0 (Drowsy)</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 5 Metrics Gauges Grid -->
+                <div class="metrics-grid">
+
+                    <!-- EYE DEBUG METRICS CARD -->
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon ear-icon"><i class="fa-solid fa-eye"></i></div>
+                        <div class="metric-info">
+                            <span class="metric-title">Eye Metrics & Closure</span>
+                            <span class="metric-value" id="ear-val">0.320</span>
+                            <span class="metric-subtext" id="ear-l-r">L: 0.320 | R: 0.320</span>
+                            <span class="metric-subtext" id="ear-thresh">Thresh: &lt; 0.26 | Closed: False</span>
+                            <span class="metric-subtext" id="closure-duration-subtext">Closure Duration: 0.0s</span>
+                        </div>
+                    </div>
+
+                    <!-- MOUTH & YAWN DEBUG METRICS CARD -->
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon mar-icon"><i class="fa-solid fa-face-grimace"></i></div>
+                        <div class="metric-info">
+                            <span class="metric-title">Mouth MAR & Yawn</span>
+                            <span class="metric-value" id="mar-val">0.145</span>
+                            <span class="metric-subtext" id="yawn-thresh">Thresh: &gt; 0.50 | Open: False</span>
+                            <span class="metric-subtext" id="yawn-duration-subtext">Yawn Duration: 0.0s</span>
+                            <span class="metric-subtext" id="yawn-confirmed-subtext">Yawn Confirmed: False</span>
+                        </div>
+                    </div>
+
+                    <!-- YOLO MOBILE PHONE DETECTOR CARD -->
+                    <div class="glass-card metric-card" id="mobile-card">
+                        <div class="metric-icon mobile-icon" id="mobile-icon"><i class="fa-solid fa-mobile-screen-button"></i></div>
+                        <div class="metric-info">
+                            <span class="metric-title">Mobile Phone Detector</span>
+                            <span class="metric-value" id="mobile-status-val">NO MOBILE</span>
+                            <span class="metric-subtext" id="mobile-conf-subtext">Confidence: 0%</span>
+                            <span class="metric-subtext" id="mobile-alert-subtext">YOLOv8 Active</span>
+                        </div>
+                    </div>
+
+                    <!-- BLINK FREQUENCY CARD -->
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon blink-icon"><i class="fa-solid fa-bolt"></i></div>
+                        <div class="metric-info">
+                            <span class="metric-title">Blink Frequency</span>
+                            <span class="metric-value" id="blink-val">16.2 <small>/min</small></span>
+                            <span class="metric-subtext">Normal: 12 - 22 /min</span>
+                            <span class="metric-subtext" id="alarm-state-subtext">Alarm Triggered: False</span>
+                        </div>
+                    </div>
+
+                    <!-- CONTINUOUS CLOSURE & SLEEPINESS SUMMARY CARD -->
+                    <div class="glass-card metric-card">
+                        <div class="metric-icon closure-icon"><i class="fa-solid fa-clock"></i></div>
+                        <div class="metric-info">
+                            <span class="metric-title">Closure & Sleepiness</span>
+                            <span class="metric-value" id="closure-val">0.0 <small>sec</small></span>
+                            <span class="metric-subtext" id="short-closures-subtext">Short Closures (1-2s): 0 / 3</span>
+                            <span class="metric-subtext">Drowsy: &ge; 2.0 sec</span>
+                        </div>
+                    </div>
+
+                </div>
+
+            </div>
+
+        </section>
+
+        <!-- Bottom Row: Real-time Telemetry Analytics & CSV Logs -->
+        <section class="grid-bottom">
+
+            <div class="glass-card chart-card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-chart-line"></i> Real-Time Telemetry Trends (EAR & MAR)</h2>
+                    <span class="live-tag"><i class="fa-solid fa-circle blink"></i> LIVE STREAM</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="telemetryChart"></canvas>
+                </div>
+            </div>
+
+            <div class="glass-card analytics-card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-database"></i> Session Telemetry & Event Logs</h2>
+                    <button class="btn btn-sm btn-secondary" onclick="retrainModel()"><i class="fa-solid fa-rotate"></i>
+                        Retrain Model</button>
+                </div>
+
+                <div class="session-stats-bar">
+                    <div class="stat-pill"><span class="pill-label">Total Frames:</span> <strong
+                            id="summary-frames">0</strong></div>
+                    <div class="stat-pill"><span class="pill-label">Duration:</span> <strong
+                            id="summary-duration">0.0s</strong></div>
+                    <div class="stat-pill"><span class="pill-label">Log Size:</span> <strong id="summary-size">0.0
+                            KB</strong></div>
+                    <div class="stat-pill"><span class="pill-label">Storage Savings:</span> <strong
+                            class="text-success">98.5% vs Raw Video</strong></div>
+                </div>
+
+                <div class="table-container">
+                    <table class="logs-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Frame</th>
+                                <th>EAR</th>
+                                <th>MAR</th>
+                                <th>Blinks/min</th>
+                                <th>Closure</th>
+                                <th>Score</th>
+                                <th>Classification State</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logs-table-body">
+                            <tr>
+                                <td colspan="8" class="text-center">Loading telemetry logs...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </section>
+
+    </main>
+
+    <!-- Custom Frontend JavaScript -->
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+
+</html>
