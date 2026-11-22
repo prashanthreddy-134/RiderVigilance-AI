@@ -36,19 +36,26 @@ class CameraManager:
         if self.is_running:
             return
         
+        self.last_error = None
+        with self.lock:
+            self.latest_frame = None
         self.is_running = True
         self.thread = threading.Thread(target=self._capture_worker, daemon=True)
         self.thread.start()
         print(f"[CameraManager] Started webcam capture thread on index {self.camera_index}")
 
-        # Wait up to 1.5 seconds for first frame to arrive
+        # Wait for a real frame (up to 5 seconds), not merely an opened device.
         wait_start = time.time()
-        while time.time() - wait_start < 1.5:
+        while time.time() - wait_start < 5.0 and self.is_running:
             with self.lock:
-                if self.latest_frame is not None:
-                    print("[CameraManager] Camera stream ready!")
-                    break
+                ready = self.latest_frame is not None
+            if ready:
+                print("[CameraManager] Camera stream ready!")
+                return
             time.sleep(0.05)
+        if self.is_running:
+            self.last_error = self.last_error or "Camera opened but no frame arrived within 5 seconds."
+            print(f"[CameraManager] WARNING: {self.last_error}")
 
     def stop(self):
         """Stops webcam capture and releases camera hardware cleanly."""
@@ -100,7 +107,13 @@ class CameraManager:
         print(f"[CameraManager] Successfully opened live webcam on index {self.camera_index} (optimized for low latency)")
 
         while self.is_running:
-            ret, frame = self.cap.read()
+            try:
+                ret, frame = self.cap.read()
+            except Exception as exc:
+                self.last_error = f"Camera read exception: {exc}"
+                print(f"[CameraManager] ERROR: {self.last_error}")
+                time.sleep(0.1)
+                continue
             if ret and frame is not None:
                 # Standardize frame to 640 width if webcam hardware overrides settings with HD/4K
                 if frame.shape[1] > 640:
@@ -118,8 +131,10 @@ class CameraManager:
             time.sleep(0.005)
 
         if self.cap is not None:
-            self.cap.release()
-            self.cap = None
+            try:
+                self.cap.release()
+            finally:
+                self.cap = None
 
     def get_frame(self):
         """Returns latest pre-fetched webcam frame or placeholder if initializing."""

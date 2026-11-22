@@ -42,6 +42,8 @@ class ComputerVisionPipeline:
         
         self.landmarker = None
         self.init_landmarker()
+        self.face_detected = False
+        self.detection_status = "INITIALIZING"
 
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
@@ -268,8 +270,13 @@ class ComputerVisionPipeline:
         mobile_detected = False
         mobile_detections = []
 
+        face_detected = False
+        detection_status = "NO FACE DETECTED"
+
         if self.use_simulation or frame is None:
             frame, left_ear, right_ear, avg_ear, raw_mar = self.generate_simulated_frame(scenario=self.sim_scenario)
+            face_detected = True
+            detection_status = "SIMULATION MODE"
             if self.sim_scenario == "mobile_use":
                 mobile_detected = True
                 mobile_detections = [{"box": [430, 180, 80, 140], "confidence": 0.96}]
@@ -280,15 +287,24 @@ class ComputerVisionPipeline:
                 frame = cv2.resize(frame, (640, int(h_orig * (640.0 / w_orig))), interpolation=cv2.INTER_LINEAR)
 
             h, w, _ = frame.shape
-            left_ear, right_ear, avg_ear, raw_mar = 0.32, 0.32, 0.32, 0.15
+            left_ear, right_ear, avg_ear, raw_mar = (
+                self.smoothed_left_ear,
+                self.smoothed_right_ear,
+                self.smoothed_avg_ear,
+                self.smoothed_mar
+            )
 
-            if self.landmarker is not None:
+            if self.landmarker is None:
+                detection_status = "FACE MODEL UNAVAILABLE"
+            else:
                 try:
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
                     result = self.landmarker.detect(mp_image)
 
                     if result.face_landmarks and len(result.face_landmarks) > 0:
+                        face_detected = True
+                        detection_status = "FACE DETECTED"
                         face_lms = result.face_landmarks[0]
                         pts = [(int(lm.x * w), int(lm.y * h)) for lm in face_lms]
 
@@ -308,6 +324,7 @@ class ComputerVisionPipeline:
                             cv2.circle(frame, pts[idx], 2, (0, 165, 255), -1)
 
                 except Exception as e:
+                    detection_status = "FACE PROCESSING ERROR"
                     print(f"[CVPipeline] Error during landmark processing: {e}")
 
             # Run YOLO Mobile Detector on camera frame
@@ -324,7 +341,16 @@ class ComputerVisionPipeline:
                 cv2.putText(frame, f"CELL PHONE: {int(conf * 100)}%", (bx + 5, max(15, by - 8)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2, cv2.LINE_AA)
 
-        # Light exponential smoothing ($\alpha = 0.70$)
+        # Publish detection status and avoid treating missing landmarks as normal data.
+        self.face_detected = face_detected
+        self.detection_status = detection_status
+        if not face_detected and not self.use_simulation:
+            left_ear = self.smoothed_left_ear
+            right_ear = self.smoothed_right_ear
+            avg_ear = self.smoothed_avg_ear
+            raw_mar = self.smoothed_mar
+
+        # Light exponential smoothing (alpha = 0.70)
         alpha = 0.70
         self.smoothed_left_ear = (alpha * left_ear) + ((1.0 - alpha) * self.smoothed_left_ear)
         self.smoothed_right_ear = (alpha * right_ear) + ((1.0 - alpha) * self.smoothed_right_ear)
@@ -342,7 +368,7 @@ class ComputerVisionPipeline:
         # -------------------------------------------------------------
         # 1. CONTINUOUS EYE-CLOSURE & SHORT CLOSURE LOGIC
         # -------------------------------------------------------------
-        is_eye_closed_now = (s_avg_ear < eye_threshold)
+        is_eye_closed_now = face_detected and (s_avg_ear < eye_threshold)
 
         if is_eye_closed_now:
             if self.eye_closed_start_time is None:
@@ -376,7 +402,7 @@ class ComputerVisionPipeline:
         # -------------------------------------------------------------
         # 2. TEMPORAL YAWN TIMER LOGIC (MAR > YAWN_MAR_THRESHOLD)
         # -------------------------------------------------------------
-        is_mouth_open_now = (s_mar > yawn_threshold)
+        is_mouth_open_now = face_detected and (s_mar > yawn_threshold)
 
         if is_mouth_open_now:
             if self.yawn_start_time is None:
@@ -459,6 +485,20 @@ class ComputerVisionPipeline:
             sleepy_confirmed=sleepy_confirmed
         )
 
+        # A missing face must never be reported as a normal fatigue assessment.
+        # Phone detection remains independently actionable.
+        if not face_detected and not mobile_detected:
+            prediction = {
+                "fatigue_score": 0.0,
+                "state_code": 0,
+                "state_name": "NO FACE DETECTED",
+                "confidence": 0.0,
+                "flags": ["FACE_NOT_DETECTED"]
+            }
+            alarm_triggered = False
+            alarm_sound_trigger = False
+            alert_message = "FACE NOT DETECTED - POSITION YOUR FACE IN THE CAMERA"
+
         self.logger.log_frame(
             frame_id=self.frame_count,
             ear=s_avg_ear,
@@ -473,7 +513,8 @@ class ComputerVisionPipeline:
 
         annotated_frame = self.render_hud_overlay(
             frame, s_left_ear, s_right_ear, s_avg_ear, s_mar, 
-            blink_rate, closure_duration, yawn_duration, short_closure_count, prediction, alert_message
+            blink_rate, closure_duration, yawn_duration, short_closure_count, prediction, alert_message,
+            detection_status=detection_status
         )
 
         return {
@@ -506,10 +547,12 @@ class ComputerVisionPipeline:
             "yawn_rate": round(yawn_rate, 1),
             "prediction": prediction,
             "frame_id": self.frame_count,
-            "is_calibrated": self.is_calibrated
+            "is_calibrated": self.is_calibrated,
+            "face_detected": face_detected,
+            "detection_status": detection_status
         }
 
-    def render_hud_overlay(self, frame, left_ear, right_ear, avg_ear, mar, blink_rate, closure_duration, yawn_duration, short_closure_count, prediction, alert_message):
+    def render_hud_overlay(self, frame, left_ear, right_ear, avg_ear, mar, blink_rate, closure_duration, yawn_duration, short_closure_count, prediction, alert_message, detection_status=""):
         h, w, _ = frame.shape
         
         state_colors = {
@@ -539,8 +582,23 @@ class ComputerVisionPipeline:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
 
         metrics_str = f"EAR: {avg_ear:.3f} (L:{left_ear:.3f}, R:{right_ear:.3f}) | MAR: {mar:.3f} | Eye Closure: {closure_duration:.1f}s | Yawn Dur: {yawn_duration:.1f}s"
-        cv2.putText(frame, metrics_str, (25, 78), 
+        cv2.putText(frame, metrics_str, (25, 78),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (230, 240, 255), 1, cv2.LINE_AA)
+
+        if detection_status:
+            status_color = (0, 220, 100) if detection_status in (
+                "FACE DETECTED", "SIMULATION MODE"
+            ) else (0, 165, 255)
+            cv2.putText(
+                frame,
+                f"CAMERA STATUS: {detection_status}",
+                (w - 300, 105),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                status_color,
+                1,
+                cv2.LINE_AA
+            )
 
         score = prediction["fatigue_score"]
         bar_x, bar_y, bar_w, bar_h = 25, 93, 250, 14
