@@ -1,9 +1,12 @@
-// Real-Time Dashboard JavaScript Engine for RiderVigilance AI
+// ============================================================
+// RIDERVIGILANCE AI - COMPLETE DASHBOARD JAVASCRIPT
+// Browser camera, telemetry, charts, alarms, logs and controls
+// ============================================================
 
 let chart = null;
-let maxChartPoints = 40;
+const maxChartPoints = 40;
 
-// Web Audio API Continuous Alarm State Trackers
+// Audio state
 let audioCtx = null;
 let alarmOscillator = null;
 let alarmGainNode = null;
@@ -11,8 +14,7 @@ let alarmSirenInterval = null;
 let isAlarmSoundPlaying = false;
 let isAudioMuted = false;
 
-// Browser webcam streaming for hosted deployments (Render).
-// Frames are captured locally and POSTed to Flask.
+// Browser webcam state
 let browserCameraStream = null;
 let browserCameraVideo = null;
 let browserCameraCanvas = null;
@@ -24,9 +26,14 @@ let hostedBrowserCamera = false;
 const BROWSER_FRAME_INTERVAL_MS = 200;
 const BROWSER_FRAME_WIDTH = 640;
 
+// Polling state
+let telemetryRequestInProgress = false;
+let telemetryIntervalId = null;
+let logsRequestInProgress = false;
+let logsIntervalId = null;
 
 // ============================================================
-// BROWSER WEBCAM FUNCTIONS
+// BROWSER WEBCAM
 // ============================================================
 
 function ensureBrowserCameraElements() {
@@ -46,7 +53,6 @@ function ensureBrowserCameraElements() {
     }
 }
 
-
 async function startBrowserCamera() {
     if (
         !hostedBrowserCamera ||
@@ -65,7 +71,7 @@ async function startBrowserCamera() {
             !navigator.mediaDevices.getUserMedia
         ) {
             throw new Error(
-                'Browser webcam access requires HTTPS and a supported browser.'
+                'Webcam access requires HTTPS and a supported browser.'
             );
         }
 
@@ -80,7 +86,6 @@ async function startBrowserCamera() {
         });
 
         browserCameraVideo.srcObject = browserCameraStream;
-
         await browserCameraVideo.play();
 
         const videoFeed = document.getElementById('video-stream');
@@ -89,36 +94,39 @@ async function startBrowserCamera() {
             videoFeed.src = `/video_feed?t=${Date.now()}`;
         }
 
-        browserCameraTimer = setInterval(
+        browserCameraTimer = window.setInterval(
             sendBrowserCameraFrame,
             BROWSER_FRAME_INTERVAL_MS
         );
 
-        console.log(
-            '[BrowserCamera] Webcam started; sending frames to server.'
-        );
+        console.log('[BrowserCamera] Webcam started.');
 
     } catch (error) {
-        console.error(
-            '[BrowserCamera] Could not start webcam:',
-            error
-        );
+        console.error('[BrowserCamera] Webcam error:', error);
 
         stopBrowserCamera();
 
         alert(
             `Could not access your webcam: ${error.message}\n` +
-            'Allow camera permission and make sure this page is opened over HTTPS.'
+            'Allow camera permission and use HTTPS.'
         );
 
+        // Restore simulation mode through the backend.
         try {
-            await fetch('/api/toggle_source', {
-                method: 'POST'
+            const response = await fetch('/api/toggle_source', {
+                method: 'POST',
+                cache: 'no-store'
             });
-        } catch (toggleError) {
+
+            if (!response.ok) {
+                console.error(
+                    '[BrowserCamera] Could not restore simulation mode.'
+                );
+            }
+        } catch (restoreError) {
             console.error(
-                '[BrowserCamera] Could not restore simulation:',
-                toggleError
+                '[BrowserCamera] Restore error:',
+                restoreError
             );
         }
 
@@ -127,12 +135,12 @@ async function startBrowserCamera() {
     }
 }
 
-
 function sendBrowserCameraFrame() {
     if (
         !browserCameraStream ||
         !browserCameraVideo ||
-        browserCameraVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+        browserCameraVideo.readyState <
+            HTMLMediaElement.HAVE_CURRENT_DATA ||
         browserFrameInFlight
     ) {
         return;
@@ -158,6 +166,10 @@ function sendBrowserCameraFrame() {
 
     const context = browserCameraCanvas.getContext('2d');
 
+    if (!context) {
+        return;
+    }
+
     context.drawImage(
         browserCameraVideo,
         0,
@@ -169,7 +181,6 @@ function sendBrowserCameraFrame() {
     browserFrameInFlight = true;
 
     browserCameraCanvas.toBlob(async (blob) => {
-
         if (!blob || !browserCameraStream) {
             browserFrameInFlight = false;
             return;
@@ -181,15 +192,17 @@ function sendBrowserCameraFrame() {
                 headers: {
                     'Content-Type': 'image/jpeg'
                 },
-                body: blob
+                body: blob,
+                cache: 'no-store'
             });
 
             if (!response.ok) {
-                const result = await response.json().catch(() => ({}));
+                const message = await response.text();
 
                 console.error(
                     '[BrowserCamera] Frame rejected:',
-                    result.error || response.statusText
+                    response.status,
+                    message.slice(0, 200)
                 );
             }
 
@@ -206,18 +219,16 @@ function sendBrowserCameraFrame() {
     }, 'image/jpeg', 0.75);
 }
 
-
 function stopBrowserCamera() {
-
-    if (browserCameraTimer) {
+    if (browserCameraTimer !== null) {
         clearInterval(browserCameraTimer);
         browserCameraTimer = null;
     }
 
     if (browserCameraStream) {
-        browserCameraStream
-            .getTracks()
-            .forEach(track => track.stop());
+        browserCameraStream.getTracks().forEach(track => {
+            track.stop();
+        });
 
         browserCameraStream = null;
     }
@@ -228,18 +239,17 @@ function stopBrowserCamera() {
     }
 
     browserFrameInFlight = false;
+
+    console.log('[BrowserCamera] Webcam stopped.');
 }
 
-
 window.addEventListener('beforeunload', stopBrowserCamera);
-
 
 // ============================================================
 // INITIALIZATION
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {
-
     initChart();
     startTelemetryLoop();
     startLogsLoop();
@@ -252,26 +262,22 @@ document.addEventListener('DOMContentLoaded', () => {
         'mousedown'
     ];
 
-    unlockEvents.forEach(evt => {
+    unlockEvents.forEach(eventName => {
         window.addEventListener(
-            evt,
+            eventName,
             unlockAudioContext,
             {
-                passive: true,
-                once: false
+                passive: true
             }
         );
     });
-
 });
-
 
 // ============================================================
 // AUDIO SYSTEM
 // ============================================================
 
 function unlockAudioContext() {
-
     try {
         if (!audioCtx) {
             audioCtx = new (
@@ -285,28 +291,26 @@ function unlockAudioContext() {
         }
 
         const btnText = document.getElementById('audio-btn-text');
+        const button = document.getElementById('enable-audio-btn');
 
         if (btnText && audioCtx.state === 'running') {
-            btnText.innerText = "Alarm Sound Active";
+            btnText.innerText = 'Alarm Sound Active';
         }
 
-        const btn = document.getElementById('enable-audio-btn');
-
-        if (btn && audioCtx.state === 'running') {
-            btn.classList.add('btn-success');
+        if (button && audioCtx.state === 'running') {
+            button.classList.add('btn-success');
         }
 
-    } catch (e) {
-        console.error(
-            "[AudioAlarm] AudioContext unlock error:",
-            e
-        );
+    } catch (error) {
+        console.error('[AudioAlarm] Audio unlock error:', error);
     }
 }
 
+function enableAudioContext() {
+    unlockAudioContext();
+}
 
 function startContinuousAlarm() {
-
     if (isAlarmSoundPlaying || isAudioMuted) {
         return;
     }
@@ -331,21 +335,24 @@ function startContinuousAlarm() {
         alarmOscillator.type = 'sawtooth';
 
         alarmGainNode.gain.setValueAtTime(
-            0.65,
+            0.35,
             audioCtx.currentTime
         );
 
         alarmOscillator.connect(alarmGainNode);
         alarmGainNode.connect(audioCtx.destination);
 
-        alarmOscillator.start();
+        alarmOscillator.frequency.setValueAtTime(
+            950,
+            audioCtx.currentTime
+        );
 
+        alarmOscillator.start();
         isAlarmSoundPlaying = true;
 
         let highTone = true;
 
-        alarmSirenInterval = setInterval(() => {
-
+        alarmSirenInterval = window.setInterval(() => {
             if (
                 !isAlarmSoundPlaying ||
                 !alarmOscillator ||
@@ -355,103 +362,76 @@ function startContinuousAlarm() {
             }
 
             const now = audioCtx.currentTime;
-            const targetFreq = highTone ? 950 : 620;
-
-            alarmOscillator.frequency.cancelScheduledValues(now);
 
             alarmOscillator.frequency.setValueAtTime(
-                targetFreq,
+                highTone ? 950 : 620,
                 now
             );
 
             highTone = !highTone;
-
         }, 200);
 
-        console.log(
-            "[AudioAlarm] Continuous alarm sound STARTED!"
-        );
+        console.log('[AudioAlarm] Alarm started.');
 
-    } catch (e) {
-        console.error(
-            "[AudioAlarm] Error starting alarm:",
-            e
-        );
+    } catch (error) {
+        console.error('[AudioAlarm] Alarm start error:', error);
     }
 }
 
-
 function stopContinuousAlarm() {
-
-    if (alarmSirenInterval) {
+    if (alarmSirenInterval !== null) {
         clearInterval(alarmSirenInterval);
         alarmSirenInterval = null;
     }
 
     if (alarmOscillator) {
-
         try {
-            const now = audioCtx
-                ? audioCtx.currentTime
-                : 0;
-
             if (alarmGainNode && audioCtx) {
-                alarmGainNode.gain.cancelScheduledValues(now);
-
                 alarmGainNode.gain.setValueAtTime(
                     0.001,
-                    now
+                    audioCtx.currentTime
                 );
             }
 
             alarmOscillator.stop();
             alarmOscillator.disconnect();
 
-        } catch (e) {}
+        } catch (error) {
+            // Oscillator may already be stopped.
+        }
 
         alarmOscillator = null;
         alarmGainNode = null;
     }
 
     isAlarmSoundPlaying = false;
-
-    console.log(
-        "[AudioAlarm] Continuous alarm sound STOPPED."
-    );
 }
 
-
 function handleAlarmSystem(data) {
-
     const banner = document.getElementById('alarm-banner');
     const bannerText = document.getElementById('alarm-banner-text');
 
-    const isAlertState = (
+    const isAlertState = Boolean(
         data.alarm_triggered ||
         data.mobile_detected ||
         data.sleepy_confirmed ||
-        data.state_code === 5 ||
-        data.state_code === 4 ||
-        data.state_code === 3 ||
-        data.state_code === 2 ||
-        data.closure_duration >= 2.0 ||
+        Number(data.state_code) >= 2 ||
+        Number(data.closure_duration) >= 2.0 ||
         data.yawn_confirmed
     );
 
     if (isAlertState) {
-
         if (banner) {
             banner.classList.remove('hidden');
+        }
 
-            if (bannerText && data.alert_message) {
-                bannerText.innerText = data.alert_message;
-            }
+        if (bannerText && data.alert_message) {
+            bannerText.innerText = data.alert_message;
         }
 
         startContinuousAlarm();
 
     } else {
-
         if (banner) {
             banner.classList.add('hidden');
         }
@@ -460,72 +440,72 @@ function handleAlarmSystem(data) {
     }
 }
 
-
 function toggleMuteAudio() {
-
     isAudioMuted = !isAudioMuted;
 
-    const btn = document.getElementById('mute-alarm-btn');
+    const button = document.getElementById('mute-alarm-btn');
 
     if (isAudioMuted) {
-
         stopContinuousAlarm();
 
-        if (btn) {
-            btn.innerHTML =
+        if (button) {
+            button.innerHTML =
                 '<i class="fa-solid fa-volume-high"></i> Unmute';
         }
 
     } else {
-
-        if (btn) {
-            btn.innerHTML =
+        if (button) {
+            button.innerHTML =
                 '<i class="fa-solid fa-volume-xmark"></i> Mute';
         }
     }
 }
+
 // ============================================================
 // CHART INITIALIZATION
 // ============================================================
 
 function initChart() {
-
-    const canvas = document.getElementById('fatigueChart');
+    const canvas = document.getElementById('telemetryChart');
 
     if (!canvas) {
-        console.warn('[Chart] fatigueChart canvas not found.');
+        console.warn('[Chart] telemetryChart canvas not found.');
         return;
     }
-
-    const ctx = canvas.getContext('2d');
 
     if (typeof Chart === 'undefined') {
         console.warn('[Chart] Chart.js is not loaded.');
         return;
     }
 
-    chart = new Chart(ctx, {
+    const context = canvas.getContext('2d');
+
+    if (!context) {
+        console.warn('[Chart] Canvas context unavailable.');
+        return;
+    }
+
+    chart = new Chart(context, {
         type: 'line',
 
         data: {
             labels: [],
-
             datasets: [
-                {
-                    label: 'Fatigue Score',
-                    data: [],
-                    borderColor: '#ef4444',
-                    backgroundColor: 'rgba(239, 68, 68, 0.12)',
-                    borderWidth: 2,
-                    tension: 0.35,
-                    fill: true,
-                    pointRadius: 0
-                },
                 {
                     label: 'EAR',
                     data: [],
                     borderColor: '#3b82f6',
                     backgroundColor: 'rgba(59, 130, 246, 0.08)',
+                    borderWidth: 2,
+                    tension: 0.35,
+                    fill: false,
+                    pointRadius: 0
+                },
+                {
+                    label: 'MAR',
+                    data: [],
+                    borderColor: '#a855f7',
+                    backgroundColor: 'rgba(168, 85, 247, 0.08)',
                     borderWidth: 2,
                     tension: 0.35,
                     fill: false,
@@ -541,7 +521,6 @@ function initChart() {
 
             scales: {
                 x: {
-                    display: true,
                     ticks: {
                         maxTicksLimit: 8,
                         color: '#94a3b8'
@@ -574,35 +553,27 @@ function initChart() {
     });
 }
 
-
 function updateChart(data) {
-
     if (!chart || !data) {
         return;
     }
 
     const now = new Date().toLocaleTimeString();
 
-    const fatigueScore = Number(
-        data.fatigue_score ?? 0
-    );
-
-    const ear = Number(
-        data.avg_ear ?? data.ear ?? 0
-    );
+    const ear = Number(data.avg_ear ?? data.ear ?? 0);
+    const mar = Number(data.mar ?? 0);
 
     chart.data.labels.push(now);
 
     chart.data.datasets[0].data.push(
-        Math.max(0, Math.min(1, fatigueScore))
-    );
-
-    chart.data.datasets[1].data.push(
         Math.max(0, Math.min(1, ear))
     );
 
-    if (chart.data.labels.length > maxChartPoints) {
+    chart.data.datasets[1].data.push(
+        Math.max(0, Math.min(1, mar))
+    );
 
+    if (chart.data.labels.length > maxChartPoints) {
         chart.data.labels.shift();
 
         chart.data.datasets.forEach(dataset => {
@@ -613,33 +584,35 @@ function updateChart(data) {
     chart.update('none');
 }
 
-
 // ============================================================
-// SAFE DOM UPDATE HELPERS
+// DOM HELPERS
 // ============================================================
 
 function setText(id, value) {
-
     const element = document.getElementById(id);
 
-    if (element && value !== undefined && value !== null) {
+    if (
+        element &&
+        value !== undefined &&
+        value !== null
+    ) {
         element.innerText = value;
     }
 }
 
-
 function setHTML(id, value) {
-
     const element = document.getElementById(id);
 
-    if (element && value !== undefined && value !== null) {
+    if (
+        element &&
+        value !== undefined &&
+        value !== null
+    ) {
         element.innerHTML = value;
     }
 }
 
-
 function setClass(id, className) {
-
     const element = document.getElementById(id);
 
     if (element) {
@@ -647,9 +620,7 @@ function setClass(id, className) {
     }
 }
 
-
 function setWidth(id, percentage) {
-
     const element = document.getElementById(id);
 
     if (element) {
@@ -662,21 +633,17 @@ function setWidth(id, percentage) {
     }
 }
 
-
 function formatNumber(value, decimals = 2) {
-
     const number = Number(value);
 
     if (!Number.isFinite(number)) {
-        return '0.00';
+        return (0).toFixed(decimals);
     }
 
     return number.toFixed(decimals);
 }
 
-
 function getFatigueLabel(data) {
-
     if (data.state_name) {
         return String(data.state_name).toUpperCase();
     }
@@ -688,105 +655,86 @@ function getFatigueLabel(data) {
     return 'INITIALIZING';
 }
 
+// ============================================================
+// TELEMETRY NORMALIZATION
+// ============================================================
 
 function normalizeTelemetry(rawData) {
-
     const data = rawData || {};
 
     return {
         ...data,
 
-        state_name:
-            data.state_name ??
-            data.status ??
-            'INITIALIZING',
+        state_name: data.state_name ??
+            data.status ?? 'INITIALIZING',
 
-        status:
-            data.status ??
-            data.state_name ??
-            'INITIALIZING',
+        status: data.status ??
+            data.state_name ?? 'INITIALIZING',
 
-        avg_ear:
-            Number(data.avg_ear ?? data.ear ?? 0),
+        avg_ear: Number(data.avg_ear ?? data.ear ?? 0),
+        ear: Number(data.ear ?? data.avg_ear ?? 0),
+        mar: Number(data.mar ?? 0),
 
-        ear:
-            Number(data.ear ?? data.avg_ear ?? 0),
+        fatigue_score: Number(data.fatigue_score ?? 0),
 
-        mar:
-            Number(data.mar ?? 0),
+        is_eye_closed: Boolean(
+            data.is_eye_closed ?? data.eye_closed ?? false
+        ),
 
-        fatigue_score:
-            Number(data.fatigue_score ?? 0),
+        eye_closed: Boolean(
+            data.eye_closed ?? data.is_eye_closed ?? false
+        ),
 
-        is_eye_closed:
-            Boolean(data.is_eye_closed ?? data.eye_closed ?? false),
+        is_mouth_open: Boolean(data.is_mouth_open ?? false),
 
-        eye_closed:
-            Boolean(data.eye_closed ?? data.is_eye_closed ?? false),
+        yawn_confirmed: Boolean(
+            data.yawn_confirmed ?? data.yawn_detected ?? false
+        ),
 
-        is_mouth_open:
-            Boolean(data.is_mouth_open ?? false),
+        yawn_detected: Boolean(
+            data.yawn_detected ?? data.yawn_confirmed ?? false
+        ),
 
-        yawn_confirmed:
-            Boolean(data.yawn_confirmed ?? data.yawn_detected ?? false),
+        sleepy_confirmed: Boolean(data.sleepy_confirmed ?? false),
 
-        yawn_detected:
-            Boolean(data.yawn_detected ?? data.yawn_confirmed ?? false),
+        mobile_detected: Boolean(
+            data.mobile_detected ?? data.phone_detected ?? false
+        ),
 
-        sleepy_confirmed:
-            Boolean(data.sleepy_confirmed ?? false),
+        phone_detected: Boolean(
+            data.phone_detected ?? data.mobile_detected ?? false
+        ),
 
-        mobile_detected:
-            Boolean(data.mobile_detected ?? data.phone_detected ?? false),
+        alarm_triggered: Boolean(data.alarm_triggered ?? false),
+        face_detected: Boolean(data.face_detected ?? false),
 
-        phone_detected:
-            Boolean(data.phone_detected ?? data.mobile_detected ?? false),
-
-        alarm_triggered:
-            Boolean(data.alarm_triggered ?? false),
-
-        face_detected:
-            Boolean(data.face_detected ?? false),
-
-        fps:
-            Number(data.fps ?? 0),
-
-        closure_duration:
-            Number(data.closure_duration ?? 0),
-
-        yawn_duration:
-            Number(data.yawn_duration ?? 0),
-
-        mobile_confidence:
-            Number(data.mobile_confidence ?? 0),
-
-        blink_rate:
-            Number(data.blink_rate ?? 0),
-
-        yawn_rate:
-            Number(data.yawn_rate ?? 0)
+        fps: Number(data.fps ?? 0),
+        closure_duration: Number(data.closure_duration ?? 0),
+        yawn_duration: Number(data.yawn_duration ?? 0),
+        mobile_confidence: Number(data.mobile_confidence ?? 0),
+        blink_rate: Number(data.blink_rate ?? 0),
+        yawn_rate: Number(data.yawn_rate ?? 0)
     };
 }
-
 
 // ============================================================
 // TELEMETRY POLLING
 // ============================================================
 
-let telemetryRequestInProgress = false;
-
 function startTelemetryLoop() {
+    if (telemetryIntervalId !== null) {
+        return;
+    }
 
     fetchTelemetry();
 
-    setInterval(() => {
-        fetchTelemetry();
-    }, 500);
+    telemetryIntervalId = window.setInterval(
+        fetchTelemetry,
+        1000
+    );
 }
 
-
 async function fetchTelemetry() {
-
     if (telemetryRequestInProgress) {
         return;
     }
@@ -794,12 +742,14 @@ async function fetchTelemetry() {
     telemetryRequestInProgress = true;
 
     try {
-
         const response = await fetch(
             `/api/telemetry?t=${Date.now()}`,
             {
                 method: 'GET',
-                cache: 'no-store'
+                cache: 'no-store',
+                headers: {
+                    'Accept': 'application/json'
+                }
             }
         );
 
@@ -810,7 +760,6 @@ async function fetchTelemetry() {
         }
 
         const rawData = await response.json();
-
         const data = normalizeTelemetry(rawData);
 
         updateDashboard(data);
@@ -824,291 +773,269 @@ async function fetchTelemetry() {
         updateSourceStatus(data);
 
     } catch (error) {
-
-        console.error(
-            '[Telemetry] Failed to fetch telemetry:',
-            error
-        );
-
-        setText(
-            'system-status',
-            'CONNECTION ERROR'
-        );
+        console.error('[Telemetry] Fetch failed:', error);
+        setText('system-status-text', 'CONNECTION ERROR');
 
     } finally {
-
         telemetryRequestInProgress = false;
     }
 }
-
 
 // ============================================================
 // DASHBOARD METRICS
 // ============================================================
 
 function updateDashboard(data) {
-
     if (!data) {
         return;
     }
 
-    // EAR
-    setText(
-        'ear-value',
-        formatNumber(data.avg_ear, 3)
-    );
+    const ear = Number(data.avg_ear ?? data.ear ?? 0);
+    const mar = Number(data.mar ?? 0);
 
-    setText(
-        'avg-ear',
-        formatNumber(data.avg_ear, 3)
-    );
-
-    // MAR
-    setText(
-        'mar-value',
-        formatNumber(data.mar, 3)
-    );
-
-    setText(
-        'mar',
-        formatNumber(data.mar, 3)
-    );
-
-    // Fatigue score
     const fatigue = Math.max(
         0,
-        Math.min(1, Number(data.fatigue_score) || 0)
+        Math.min(1, Number(data.fatigue_score ?? 0))
     );
 
-    setText(
-        'fatigue-score',
-        `${(fatigue * 100).toFixed(1)}%`
-    );
-
-    setText(
-        'fatigue-value',
-        `${(fatigue * 100).toFixed(1)}%`
-    );
-
-    setWidth(
-        'fatigue-progress',
-        fatigue * 100
-    );
-
-    // FPS
-    setText(
-        'fps-value',
-        formatNumber(data.fps, 1)
-    );
-
-    setText(
-        'fps',
-        formatNumber(data.fps, 1)
-    );
-
-    // Eye closure
-    setText(
-        'closure-duration',
-        `${formatNumber(data.closure_duration, 2)} s`
-    );
-
-    // Yawn duration
-    setText(
-        'yawn-duration',
-        `${formatNumber(data.yawn_duration, 2)} s`
-    );
-
-    // Blink rate
-    setText(
-        'blink-rate',
-        formatNumber(data.blink_rate, 1)
-    );
-
-    // Yawn rate
-    setText(
-        'yawn-rate',
-        formatNumber(data.yawn_rate, 1)
-    );
-
-    // Phone confidence
-    setText(
-        'phone-confidence',
-        `${(data.mobile_confidence * 100).toFixed(1)}%`
-    );
-
-    // Face status
-    setText(
-        'face-status',
-        data.face_detected
-            ? 'FACE DETECTED'
-            : 'NO FACE DETECTED'
-    );
-
-    // Eye status
-    setText(
-        'eye-status',
-        data.is_eye_closed
-            ? 'EYES CLOSED'
-            : 'EYES OPEN'
-    );
-
-    // Yawn status
-    setText(
-        'yawn-status',
-        data.yawn_confirmed
-            ? 'YAWN DETECTED'
-            : 'NORMAL'
-    );
-
-    // Phone status
-    setText(
-        'phone-status',
-        data.mobile_detected
-            ? 'PHONE DETECTED'
-            : 'NO PHONE'
-    );
-
-    // Main state
     const state = getFatigueLabel(data);
 
+    const leftEar = Number(
+        data.left_ear ?? data.ear_left ?? ear
+    );
+
+    const rightEar = Number(
+        data.right_ear ?? data.ear_right ?? ear
+    );
+
+    const confidence = Number(
+        data.confidence ??
+        data.classification_confidence ?? 0
+    );
+
+    setText('ear-val', formatNumber(ear, 3));
+
     setText(
-        'state-name',
-        state
+        'ear-l-r',
+        `L: ${formatNumber(leftEar, 3)} | R: ${formatNumber(rightEar, 3)}`
     );
 
     setText(
-        'fatigue-state',
-        state
+        'ear-thresh',
+        `Thresh: < 0.26 | Closed: ${Boolean(data.is_eye_closed ?? data.eye_closed)}`
     );
 
     setText(
-        'system-status',
-        data.status || state
+        'closure-duration-subtext',
+        `Closure Duration: ${formatNumber(data.closure_duration, 1)}s`
     );
 
-    // Alert message
-    if (data.alert_message) {
-        setText(
-            'alert-message',
-            data.alert_message
-        );
-    }
+    setText('mar-val', formatNumber(mar, 3));
 
-    updateDetectionIndicators(data);
-}
-
-
-function updateDetectionIndicators(data) {
-
-    const faceIndicator = document.getElementById(
-        'face-indicator'
+    setText(
+        'yawn-thresh',
+        `Thresh: > 0.50 | Open: ${Boolean(data.is_mouth_open)}`
     );
 
-    if (faceIndicator) {
-        faceIndicator.classList.toggle(
-            'active',
-            Boolean(data.face_detected)
-        );
-    }
-
-    const eyeIndicator = document.getElementById(
-        'eye-indicator'
+    setText(
+        'yawn-duration-subtext',
+        `Yawn Duration: ${formatNumber(data.yawn_duration, 1)}s`
     );
 
-    if (eyeIndicator) {
-        eyeIndicator.classList.toggle(
+    setText(
+        'yawn-confirmed-subtext',
+        `Yawn Confirmed: ${Boolean(data.yawn_confirmed ?? data.yawn_detected)}`
+    );
+
+    setText('fatigue-score-val', fatigue.toFixed(2));
+    setWidth('fatigue-score-bar', fatigue * 100);
+
+    setText(
+        'confidence-val',
+        confidence > 0
+            ? `${(confidence <= 1 ? confidence * 100 : confidence).toFixed(0)}%`
+            : '—'
+    );
+
+    setText(
+        'mobile-status-val',
+        data.mobile_detected ? 'PHONE DETECTED' : 'NO MOBILE'
+    );
+
+    setText(
+        'mobile-conf-subtext',
+        `Confidence: ${(Number(data.mobile_confidence ?? 0) * 100).toFixed(1)}%`
+    );
+
+    setText(
+        'mobile-alert-subtext',
+        data.mobile_detected
+            ? 'Potential mobile use detected'
+            : 'YOLOv8 Active'
+    );
+
+    setText(
+        'blink-val',
+        `${formatNumber(data.blink_rate, 1)} /min`
+    );
+
+    setText(
+        'alarm-state-subtext',
+        `Alarm Triggered: ${Boolean(data.alarm_triggered)}`
+    );
+
+    setText(
+        'closure-val',
+        `${formatNumber(data.closure_duration, 1)} sec`
+    );
+
+    setText(
+        'short-closures-subtext',
+        `Short Closures (1-2s): ${Number(data.short_closures_count ?? data.short_closures ?? 0)} / 3`
+    );
+
+    setText('current-state-title', state);
+    setText('state-text', state);
+
+    setText(
+        'current-state-desc',
+        data.state_description ||
+        data.alert_message ||
+        (
+            data.face_detected
+                ? 'Facial landmarks are being monitored.'
+                : 'Position your face clearly in the camera.'
+        )
+    );
+
+    setText(
+        'system-status-text',
+        data.face_detected
+            ? 'SYSTEM ACTIVE'
+            : 'WAITING FOR FACE'
+    );
+
+    const stateDot = document.getElementById('state-dot');
+
+    if (stateDot) {
+        stateDot.classList.toggle(
             'warning',
-            Boolean(data.is_eye_closed)
+            Number(data.state_code) >= 2 ||
+            Boolean(data.alarm_triggered)
         );
     }
 
-    const phoneIndicator = document.getElementById(
-        'phone-indicator'
-    );
+    const stateBox = document.getElementById('state-display-box');
 
-    if (phoneIndicator) {
-        phoneIndicator.classList.toggle(
+    if (stateBox) {
+        stateBox.dataset.state = String(
+            data.state_name ?? data.status ?? 'unknown'
+        ).toLowerCase();
+    }
+
+    const mobileCard = document.getElementById('mobile-card');
+
+    if (mobileCard) {
+        mobileCard.classList.toggle(
             'warning',
             Boolean(data.mobile_detected)
         );
     }
 
-    const yawnIndicator = document.getElementById(
-        'yawn-indicator'
-    );
+    const bannerText = document.getElementById('alarm-banner-text');
 
-    if (yawnIndicator) {
-        yawnIndicator.classList.toggle(
-            'warning',
-            Boolean(data.yawn_confirmed)
-        );
+    if (bannerText && data.alert_message) {
+        bannerText.innerText = data.alert_message;
     }
+
+    updateDetectionIndicators(data);
 }
 
+function updateDetectionIndicators(data) {
+    const dot = document.getElementById('state-dot');
+
+    if (dot) {
+        dot.classList.toggle(
+            'warning',
+            Boolean(
+                data.is_eye_closed ||
+                data.yawn_confirmed ||
+                data.mobile_detected ||
+                data.alarm_triggered
+            )
+        );
+    }
+
+    const icon = document.getElementById('state-icon');
+
+    if (icon) {
+        const iconClass = data.mobile_detected
+            ? 'fa-solid fa-mobile-screen-button'
+            : data.sleepy_confirmed
+                ? 'fa-solid fa-triangle-exclamation'
+                : data.yawn_confirmed
+                    ? 'fa-solid fa-face-grimace'
+                    : 'fa-solid fa-face-smile';
+
+        icon.innerHTML = `<i class="${iconClass}"></i>`;
+    }
+}
 
 // ============================================================
 // CAMERA SOURCE STATUS
 // ============================================================
 
 function updateSourceStatus(data) {
+    const source = String(
+        data.source || 'unknown'
+    ).toLowerCase();
 
-    const source = data.source || 'unknown';
-
-    setText(
-        'camera-source',
-        source.toUpperCase()
-    );
-
-    setText(
-        'source-label',
-        source.toUpperCase()
-    );
-
-    const badge = document.getElementById(
-        'source-badge'
-    );
+    const badge = document.getElementById('feed-mode-badge');
 
     if (badge) {
-        badge.innerText = source.toUpperCase();
-
-        badge.classList.toggle(
-            'source-live',
-            source === 'local' || source === 'browser'
-        );
-
-        badge.classList.toggle(
-            'source-simulation',
-            source === 'simulation'
-        );
+        badge.innerText =
+            source === 'browser' || source === 'local'
+                ? 'LIVE CAMERA'
+                : source === 'simulation'
+                    ? 'SIMULATED FEED'
+                    : source.toUpperCase();
     }
 
-    const videoFeed = document.getElementById(
-        'video-stream'
-    );
+    const buttonText = document.getElementById('source-btn-text');
+    const button = document.getElementById('toggle-source-btn');
 
-    if (videoFeed && !hostedBrowserCamera && !videoFeed.src) {
-        videoFeed.src = `/video_feed?t=${Date.now()}`;
+    if (buttonText && !button?.disabled) {
+        buttonText.innerText = source === 'simulation'
+            ? 'Switch to Live Webcam'
+            : 'Switch to Simulated Feed';
     }
 
-    if (hostedBrowserCamera && !browserCameraStream) {
+    if (
+        source === 'browser' &&
+        hostedBrowserCamera &&
+        !browserCameraStream &&
+        !browserCameraStarting
+    ) {
         startBrowserCamera();
-    }
 
-    if (!hostedBrowserCamera && browserCameraStream) {
+    } else if (
+        source !== 'browser' &&
+        browserCameraStream
+    ) {
         stopBrowserCamera();
     }
 }
+
 // ============================================================
 // SIMULATION SCENARIO CONTROL
 // ============================================================
 
 async function setScenario(scenario, btnElement) {
-
-    stopBrowserCamera();
-
     const buttons = document.querySelectorAll('.btn-scenario');
 
-    buttons.forEach(button => button.classList.remove('active'));
+    buttons.forEach(button => {
+        button.classList.remove('active');
+    });
 
     if (btnElement) {
         btnElement.classList.add('active');
@@ -1118,16 +1045,31 @@ async function setScenario(scenario, btnElement) {
         const response = await fetch('/api/set_scenario', {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
             },
-            body: JSON.stringify({ scenario })
+            body: JSON.stringify({ scenario }),
+            cache: 'no-store'
         });
 
-        const data = await response.json().catch(() => ({}));
+        const rawBody = await response.text();
+        let data = {};
+
+        try {
+            data = rawBody ? JSON.parse(rawBody) : {};
+        } catch {
+            throw new Error(
+                `Invalid server response (HTTP ${response.status}).`
+            );
+        }
 
         if (!response.ok) {
-            throw new Error(data.error || 'Could not change simulation scenario.');
+            throw new Error(
+                data.error || 'Could not change simulation scenario.'
+            );
         }
+
+        stopBrowserCamera();
 
         const videoImage = document.getElementById('video-stream');
 
@@ -1141,15 +1083,21 @@ async function setScenario(scenario, btnElement) {
     }
 }
 
-
 // ============================================================
-// CAMERA SOURCE CONTROL
+// CAMERA SOURCE SWITCHING
 // ============================================================
 
 async function toggleFeedSource() {
-
+    const button = document.getElementById('toggle-source-btn');
     const buttonText = document.getElementById('source-btn-text');
-    const previousText = buttonText ? buttonText.innerText : '';
+
+    if (!button || button.disabled) {
+        return;
+    }
+
+    const previousText = buttonText?.innerText || '';
+
+    button.disabled = true;
 
     if (buttonText) {
         buttonText.innerText = 'Switching feed...';
@@ -1157,17 +1105,32 @@ async function toggleFeedSource() {
 
     try {
         const response = await fetch('/api/toggle_source', {
-            method: 'POST'
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json'
+            },
+            cache: 'no-store'
         });
 
-        const data = await response.json();
+        const rawBody = await response.text();
+        let data = {};
 
-        if (!response.ok || data.success === false) {
-            throw new Error(data.error || 'Could not switch camera source.');
+        try {
+            data = rawBody ? JSON.parse(rawBody) : {};
+        } catch {
+            throw new Error(
+                `Server returned invalid JSON (HTTP ${response.status}): ${rawBody.slice(0, 200)}`
+            );
+        }
+
+        if (!response.ok || !data.success) {
+            throw new Error(
+                data.error ||
+                `Source switch failed (HTTP ${response.status})`
+            );
         }
 
         hostedBrowserCamera = Boolean(
-            data.browser_camera_required ||
             data.hosted_browser_camera
         );
 
@@ -1177,16 +1140,17 @@ async function toggleFeedSource() {
             videoImage.src = `/video_feed?t=${Date.now()}`;
         }
 
-        if (data.use_simulation) {
-
+        if (data.source === 'simulation') {
             stopBrowserCamera();
 
             if (buttonText) {
                 buttonText.innerText = 'Switch to Live Webcam';
             }
 
-        } else if (hostedBrowserCamera) {
-
+        } else if (
+            data.source === 'browser' &&
+            data.browser_camera_required
+        ) {
             if (buttonText) {
                 buttonText.innerText = 'Starting browser webcam...';
             }
@@ -1200,13 +1164,14 @@ async function toggleFeedSource() {
             }
 
         } else {
-
             stopBrowserCamera();
 
             if (buttonText) {
                 buttonText.innerText = 'Switch to Simulated Feed';
             }
         }
+
+        console.log('[Camera] Active source:', data.source);
 
     } catch (error) {
         console.error('[Camera] Source switch failed:', error);
@@ -1216,57 +1181,79 @@ async function toggleFeedSource() {
         }
 
         alert(error.message || 'Failed to switch camera source.');
+
+    } finally {
+        button.disabled = false;
     }
 }
-
 
 // ============================================================
 // SESSION SUMMARY
 // ============================================================
 
 async function fetchSummary() {
-
     try {
         const response = await fetch('/api/summary', {
-            cache: 'no-store'
+            cache: 'no-store',
+            headers: {
+                'Accept': 'application/json'
+            }
         });
 
         if (!response.ok) {
-            return;
+            throw new Error(`Summary HTTP error: ${response.status}`);
         }
 
         const data = await response.json();
 
         const totalFrames = Number(
-            data.total_frames ?? data.total_frames_logged ?? 0
+            data.total_frames ??
+            data.total_frames_logged ?? 0
         );
 
-        const duration = Number(data.duration_seconds ?? 0);
-        const sizeKb = Number(data.log_file_size_kb ?? 0);
+        const duration = Number(
+            data.duration_seconds ?? 0
+        );
 
-        setText('summary-frames', totalFrames.toLocaleString());
-        setText('summary-duration', `${duration.toFixed(1)}s`);
-        setText('summary-size', `${sizeKb.toFixed(1)} KB`);
+        const sizeKb = Number(
+            data.log_file_size_kb ?? 0
+        );
+
+        setText(
+            'summary-frames',
+            totalFrames.toLocaleString()
+        );
+
+        setText(
+            'summary-duration',
+            `${duration.toFixed(1)}s`
+        );
+
+        setText(
+            'summary-size',
+            `${sizeKb.toFixed(1)} KB`
+        );
 
     } catch (error) {
         console.error('[Summary] Fetch error:', error);
     }
 }
 
-
 // ============================================================
 // RECENT CSV LOGS
 // ============================================================
 
 async function fetchLogs() {
-
     try {
         const response = await fetch('/api/logs', {
-            cache: 'no-store'
+            cache: 'no-store',
+            headers: {
+                'Accept': 'application/json'
+            }
         });
 
         if (!response.ok) {
-            return;
+            throw new Error(`Logs HTTP error: ${response.status}`);
         }
 
         const data = await response.json();
@@ -1281,7 +1268,7 @@ async function fetchLogs() {
             ? data
             : (data.recent_rows || []);
 
-        if (rows.length === 0) {
+        if (!rows.length) {
             tbody.innerHTML = `
                 <tr>
                     <td colspan="8" class="text-center">
@@ -1293,7 +1280,6 @@ async function fetchLogs() {
         }
 
         tbody.innerHTML = rows.slice(-15).reverse().map(row => {
-
             const ear = Number(row.ear ?? row.avg_ear ?? 0);
             const mar = Number(row.mar ?? 0);
             const blinkRate = Number(row.blink_rate ?? 0);
@@ -1310,8 +1296,8 @@ async function fetchLogs() {
                     <td>${closure.toFixed(1)}s</td>
                     <td><strong>${fatigue.toFixed(2)}</strong></td>
                     <td>
-                        <span class="pill-state state-${row.state_code ?? 0}">
-                            ${row.state_name ?? 'UNKNOWN'}
+                        <span class="pill-state state-${Number(row.state_code ?? 0)}">
+                            ${String(row.state_name ?? 'UNKNOWN')}
                         </span>
                     </td>
                 </tr>
@@ -1323,16 +1309,15 @@ async function fetchLogs() {
     }
 }
 
-
-let logsRequestInProgress = false;
-
 function startLogsLoop() {
+    if (logsIntervalId !== null) {
+        return;
+    }
 
     fetchLogs();
     fetchSummary();
 
-    setInterval(async () => {
-
+    logsIntervalId = window.setInterval(async () => {
         if (logsRequestInProgress) {
             return;
         }
@@ -1349,13 +1334,11 @@ function startLogsLoop() {
     }, 5000);
 }
 
-
 // ============================================================
-// EXPORT ACTIVE CSV LOG
+// EXPORT CSV LOG
 // ============================================================
 
 async function exportActiveLog() {
-
     try {
         const response = await fetch('/api/logs', {
             cache: 'no-store'
@@ -1380,13 +1363,11 @@ async function exportActiveLog() {
     }
 }
 
-
 // ============================================================
 // MODEL RETRAINING
 // ============================================================
 
 async function retrainModel() {
-
     const confirmed = confirm(
         'Retrain the Random Forest model using telemetry data?'
     );
@@ -1397,16 +1378,24 @@ async function retrainModel() {
 
     try {
         const response = await fetch('/api/retrain', {
-            method: 'POST'
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json'
+            }
         });
 
         const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
-            throw new Error(data.error || 'Model retraining failed.');
+            throw new Error(
+                data.error || 'Model retraining failed.'
+            );
         }
 
-        alert(data.message || 'Model retraining request completed.');
+        alert(
+            data.message ||
+            'Model retraining request completed.'
+        );
 
     } catch (error) {
         console.error('[Retraining] Failed:', error);
@@ -1414,7 +1403,6 @@ async function retrainModel() {
     }
 }
 
-
 // ============================================================
-// END OF RIDERVIGILANCE DASHBOARD SCRIPT
+// END OF RIDERVIGILANCE AI JAVASCRIPT
 // ============================================================
